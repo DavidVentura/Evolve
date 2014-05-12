@@ -122,13 +122,20 @@ void Widget::run()
     // Main loop
     while (running)
     {
-        if (polys.size() > 10 && SHAPE_OPT_FREQ != 0 && qrand()%SHAPE_OPT_FREQ == 0)
-        {
-            int i = qrand()%polys.size();
-            optimizeShape(generated, polys[i], true);
+        if (qrand() % 10 == 0){
+            for (Poly &p : polys){
+                if (p.resizeTimes < 10){
+                    optimizeShape(generated, p, true);
+                    p.resizeTimes++;
+                }
+                optimizeColors(generated,p,false);
+            }
+            redraw(generated);
+            ui->imgBest->setPixmap(QPixmap::fromImage(generated));
+
         }
-        else
-        {
+
+        if (qrand() % 3 == 0 || polys.count() < 30) {
 
             Poly poly = genPoly();
             QImage newGen = generated;
@@ -269,12 +276,63 @@ void Widget::optimizeShape(QImage& target, Poly& poly, bool redraw)
         // Instead of retrying other directions after one stops working
         // Call repeatedly to optimize further
         int direction;
+        int max,min,curPos,bestScore,bestPos;
+        bool betterL=false, betterU=false;
         for (direction=0; direction<4; direction++)
         {
-            do
+            bestScore=fitness;
+            if(direction==0) {//UP
+                max=point.y();
+                bestPos=point.y();
+                min=0;
+            }
+            if (direction==1 && !betterU) { //DOWN
+                max=height;
+                min=point.y();
+                bestPos=point.y();
+            }
+            if (direction==2) { //LEFT
+                max=point.x();
+                min=0;
+                bestPos=point.x();
+            }
+            if (direction==3 && !betterL) { //RIGHT
+                max=width;
+                min=point.x();
+                bestPos=point.x();
+            }
+            app->processEvents();
+            while(max!=min){
+                if (max>200 || min>200) {
+                    max=200;
+                }
+                curPos=(int)(max+min)/2;
+                if (direction<2)
+                    point.setY(curPos);
+                else
+                    point.setX(curPos);
+
+                validate();
+                if (fitness < bestScore){
+                    if (direction==0) betterU=true;
+                    if (direction==2) betterL=true;
+                    min=curPos;
+                    bestScore=fitness;
+                    bestPos=curPos;
+                } else {
+                    max=curPos;
+                }
+            }
+            if (direction<2)
+                point.setY(bestPos);
+            else
+                point.setX(bestPos);
+        }
+
+            /*do
             {
                 app->processEvents();
-                if (direction==0)
+                if (direction==0) //UP
                     point.setY(max(point.y()-N_POS_VAR,0));
                 else if (direction==1)
                     point.setX(min((unsigned)point.x()+N_POS_VAR, width));
@@ -282,8 +340,7 @@ void Widget::optimizeShape(QImage& target, Poly& poly, bool redraw)
                     point.setY(min((unsigned)point.y()+N_POS_VAR, height));
                 else if (direction==3)
                     point.setX(max(point.x()-N_POS_VAR,0));
-            } while (validate());
-        }
+            } while (validate());*/
     }
 }
 
