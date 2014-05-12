@@ -125,14 +125,14 @@ void Widget::run()
         if (qrand() % 10 == 0){
             for (Poly &p : polys){
                 if (p.resizeTimes < 10){
-                    optimizeShape(generated, p, true);
+                    optimizeShape(generated, p, false);
                     p.resizeTimes++;
                 }
                 optimizeColors(generated,p,false);
             }
             redraw(generated);
             ui->imgBest->setPixmap(QPixmap::fromImage(generated));
-
+            app->processEvents();
         }
 
         if (qrand() % 3 == 0 || polys.count() < 30) {
@@ -303,9 +303,6 @@ void Widget::optimizeShape(QImage& target, Poly& poly, bool redraw)
             }
             app->processEvents();
             while(max!=min){
-                if (max>200 || min>200) {
-                    max=200;
-                }
                 curPos=(int)(max+min)/2;
                 if (direction<2)
                     point.setY(curPos);
@@ -329,18 +326,6 @@ void Widget::optimizeShape(QImage& target, Poly& poly, bool redraw)
                 point.setX(bestPos);
         }
 
-            /*do
-            {
-                app->processEvents();
-                if (direction==0) //UP
-                    point.setY(max(point.y()-N_POS_VAR,0));
-                else if (direction==1)
-                    point.setX(min((unsigned)point.x()+N_POS_VAR, width));
-                else if (direction==2)
-                    point.setY(min((unsigned)point.y()+N_POS_VAR, height));
-                else if (direction==3)
-                    point.setX(max(point.x()-N_POS_VAR,0));
-            } while (validate());*/
     }
 }
 
@@ -376,7 +361,7 @@ Poly Widget::genPoly()
     }
     avgx /= N_POLY_POINTS;
     avgy /= N_POLY_POINTS;
-    r/=poly.points.count();
+    /*r/=poly.points.count();
     g/=poly.points.count();
     b/=poly.points.count();
 
@@ -388,8 +373,8 @@ Poly Widget::genPoly()
     g/=2;
     b/=2;
     qc = QColor(r,g,b);
-    poly.color = qc;
-    //poly.color = pic.pixel(avgx,avgy);
+    poly.color = qc;*/
+    poly.color = pic.pixel(avgx,avgy);
     poly.color.setAlpha(qrand()%180+20);
 #endif
     return poly;
