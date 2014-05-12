@@ -2,6 +2,7 @@
 #include "ui_widget.h"
 #include "progressdialog.h"
 #include "settings.h"
+#include "settingsWidget.h"
 #include <QDataStream>
 #include <QString>
 #include <QPixmap>
@@ -14,6 +15,7 @@
 
 unsigned Widget::height;
 unsigned Widget::width;
+QImage Widget::pic;
 
 using namespace std;
 
@@ -63,10 +65,8 @@ Widget::~Widget()
     exit(0);
 }
 
-int Widget::computeFitness(QImage& target, QRect box)
+int Widget::computeFitness(const QImage& target, const QRect box)
 {
-    QAtomicInt fitness = 0;
-
     unsigned minx, maxx, miny, maxy;
     if (box.isNull())
     {
@@ -82,36 +82,40 @@ int Widget::computeFitness(QImage& target, QRect box)
         maxy = miny + box.height();
     }
 
-    QVector<QRgb*> targetLines;
-    QVector<QRgb*> originalLines;
+    static QVector<QRgb*> originalLines;
+    originalLines.resize(maxy-miny);
     for (unsigned i=miny; i<maxy; i++)
-        originalLines.append((QRgb*)pic.scanLine(i));
+        originalLines[i] = ((QRgb*)pic.scanLine(i));
+    static QVector<QRgb*> targetLines;
+    targetLines.resize(maxy-miny);
     for (unsigned i=miny; i<maxy; i++)
-        targetLines.append((QRgb*)target.scanLine(i));
+        targetLines[i] = ((QRgb*)target.scanLine(i));
 
-    auto computeSlice = [&](unsigned start, unsigned end)
+    auto computeSlice = [&](const unsigned start, const unsigned end)
     {
+        unsigned partFitness=0;
         for (unsigned i=start-miny; i<end-miny; i++)
         {
             // Sum of the differences of each pixel's color
             for (unsigned j=minx; j<maxx; j++)
             {
-                int tR,tG,tB;
-                int oR,oG,oB;
-                QColor(targetLines.at(i)[j]).getRgb(&tR,&tG,&tB);
-                QColor(originalLines.at(i)[j]).getRgb(&oR,&oG,&oB);
-                unsigned diff = abs(tR-oR)+abs(tG-oG)+abs(tB-oB);
-                fitness.fetchAndAddRelaxed(diff);
+                unsigned ocolor = originalLines.at(i)[j];
+                int oR=(ocolor>>16), oG=(ocolor>>8)&0xFF, oB=(ocolor&0xFF);
+                unsigned tcolor = targetLines.at(i)[j];
+                int tR=(tcolor>>16), tG=(tcolor>>8)&0xFF, tB=(tcolor&0xFF);
+                partFitness += abs(tR-oR)+abs(tG-oG)+abs(tB-oB);
             }
         }
+        return partFitness;
     };
-    QFuture<void> slices[N_CORES];
+    QFuture<unsigned> slices[N_CORES];
     for (int i=0; i < N_CORES; i++){
         slices[i] = QtConcurrent::run(computeSlice, miny+(maxy/N_CORES) *i, (maxy/N_CORES) * (i+1));
     }
+	unsigned fitness=0;
     for (int i=0; i < N_CORES; i++)
-        slices[i].waitForFinished();
-    return fitness.load();
+        fitness+=slices[i].result();
+    return fitness;
 }
 
 void Widget::run()
@@ -122,21 +126,22 @@ void Widget::run()
     // Main loop
     while (running)
     {
-        if (qrand() % 10 == 0){
-            for (Poly &p : polys){
-                if (p.resizeTimes < 10){
-                    optimizeShape(generated, p, false);
-                    p.resizeTimes++;
-                }
-                optimizeColors(generated,p,false);
-            }
-            redraw(generated);
-            ui->imgBest->setPixmap(QPixmap::fromImage(generated));
+        int polysSize = polys.size();
+
+        // Lower the number of points to get more details
+        if (polysSize == 25 && SettingsWidget::isDefaultConfig)
+            N_POLY_POINTS = 5;
+        else if (polysSize == 75 && SettingsWidget::isDefaultConfig)
+            N_POLY_POINTS = 4;
+
+        if (SHAPE_OPT_FREQ != 0 && polysSize > 10 && qrand()%SHAPE_OPT_FREQ == 0)
+        {
+            int i = qrand()%polysSize;
+            optimizeShape(generated, polys[i], true);
             app->processEvents();
         }
-
-        if (qrand() % 3 == 0 || polys.count() < 30) {
-
+        else
+        {
             Poly poly = genPoly();
             QImage newGen = generated;
             drawPoly(newGen, poly);
@@ -151,7 +156,7 @@ void Widget::run()
 
                 // Optimize
                 optimizeColors(clean, polys.last());
-                optimizeShape(clean, polys.last());
+                //optimizeShape(clean, polys.last());
                 fitness = computeFitness(generated);
 
                 // Update GUI
@@ -208,12 +213,19 @@ QColor Widget::optimizeColors(QImage& target, Poly& poly, bool redraw)
             return false;
     };
 
+    int processEventsRatelimit = 0;
     int targetColor;
     for (targetColor=0; targetColor <= 8; targetColor++)
     {
         do
         {
-            app->processEvents();
+            if (processEventsRatelimit == GUI_REFRESH_RATE) // processEvents is a massive slowdown
+            {
+                processEventsRatelimit=0;
+                app->processEvents();
+            }
+            else
+                processEventsRatelimit++;
             QColor color = poly.color;
             if (targetColor == 0)
                 color = color.lighter(110); // Lighter
@@ -244,14 +256,47 @@ QColor Widget::optimizeColors(QImage& target, Poly& poly, bool redraw)
 
 void Widget::optimizeShape(QImage& target, Poly& poly, bool redraw)
 {
+    int polyIndex=0;
+    QImage predraw(width, height, QImage::Format_ARGB32);
+    if (redraw)
+    {
+        // Precompute the image of all the polys before this one
+        predraw.fill(Qt::white);
+        static QBrush brush(Qt::SolidPattern);
+        QPainter painter(&predraw);
+        painter.setPen(QPen(Qt::NoPen));
+        polyIndex = polys.indexOf(poly);
+        for (int i=0; i<polyIndex; ++i)
+        {
+            brush.setColor(polys[polyIndex].color);
+            painter.setBrush(brush);
+            painter.drawPolygon(polys[polyIndex].points.data(), polys[polyIndex].points.size());
+        }
+        app->processEvents();
+    }
+
     // Check if the pic is better, commit and return if it is
     auto validate = [&]()
     {
-        QImage newGen = target;
+        QImage newGen;
         if (redraw)
-            this->redraw(newGen);
+        {
+            newGen = predraw;
+            static QBrush brush(Qt::SolidPattern);
+            QPainter painter(&predraw);
+            painter.setPen(QPen(Qt::NoPen));
+            for (int i=polyIndex; i<polys.size(); ++i)
+            {
+                brush.setColor(polys[polyIndex].color);
+                painter.setBrush(brush);
+                painter.drawPolygon(polys[polyIndex].points.data(), polys[polyIndex].points.size());
+            }
+        }
         else
+        {
+            newGen = target;
             drawPoly(newGen, poly);
+        }
         int newFit = computeFitness(newGen);
         generation++;
         ui->generationLabel->setNum(generation);
@@ -270,6 +315,7 @@ void Widget::optimizeShape(QImage& target, Poly& poly, bool redraw)
             return false;
     };
 
+    int processEventsRatelimit = 0;
     for (QPoint& point : poly.points)
     {
         // Only try once each directions until they stop working
@@ -280,6 +326,14 @@ void Widget::optimizeShape(QImage& target, Poly& poly, bool redraw)
         bool betterL=false, betterU=false;
         for (direction=0; direction<4; direction++)
         {
+            if (processEventsRatelimit == GUI_REFRESH_RATE) // processEvents is a massive slowdown
+            {
+                processEventsRatelimit=0;
+                app->processEvents();
+            }
+            else
+                processEventsRatelimit++;
+
             bestScore=fitness;
             if(direction==0) {//UP
                 max=point.y();
@@ -301,7 +355,6 @@ void Widget::optimizeShape(QImage& target, Poly& poly, bool redraw)
                 min=point.x();
                 bestPos=point.x();
             }
-            app->processEvents();
             while(max!=min){
                 curPos=(int)(max+min)/2;
                 if (direction<2)
@@ -325,8 +378,8 @@ void Widget::optimizeShape(QImage& target, Poly& poly, bool redraw)
             else
                 point.setX(bestPos);
         }
-
     }
+    app->processEvents();
 }
 
 Poly Widget::genPoly()
@@ -348,7 +401,7 @@ Poly Widget::genPoly()
     poly.color.setAlpha(qrand()%180+20);
 #else
     quint64 avgx=0, avgy=0;
-    int r=0,g=0,b=0;
+    int r=0,g=0,b=0,polypoints=poly.points.count();
     QColor qc;
     for (QPoint point : poly.points)
     {
@@ -359,11 +412,11 @@ Poly Widget::genPoly()
         avgx += point.x();
         avgy += point.y();
     }
-    avgx /= N_POLY_POINTS;
-    avgy /= N_POLY_POINTS;
-    /*r/=poly.points.count();
-    g/=poly.points.count();
-    b/=poly.points.count();
+    avgx /= polypoints;
+    avgy /= polypoints;
+    r/=polypoints;
+    g/=polypoints;
+    b/=polypoints;
 
     qc = pic.pixel(avgx,avgy);
     r+=qc.red();
@@ -373,8 +426,8 @@ Poly Widget::genPoly()
     g/=2;
     b/=2;
     qc = QColor(r,g,b);
-    poly.color = qc;*/
-    poly.color = pic.pixel(avgx,avgy);
+    poly.color = qc; //more averaged color
+   // poly.color = pic.pixel(avgx,avgy);
     poly.color.setAlpha(qrand()%180+20);
 #endif
     return poly;
@@ -382,19 +435,26 @@ Poly Widget::genPoly()
 
 void Widget::drawPoly(QImage& target, Poly& poly)
 {
+    static QBrush brush(Qt::SolidPattern);
     QPainter painter(&target);
     painter.setPen(QPen(Qt::NoPen));
-    QBrush brush(poly.color);
-    brush.setStyle(Qt::SolidPattern);
+    brush.setColor(poly.color);
     painter.setBrush(brush);
     painter.drawPolygon(poly.points.data(), poly.points.size());
 }
 
 void Widget::redraw(QImage& target)
 {
+    static QBrush brush(Qt::SolidPattern);
     target.fill(Qt::white);
+    QPainter painter(&target);
+    painter.setPen(QPen(Qt::NoPen));
     for (Poly& poly : polys)
-        drawPoly(target, poly);
+    {
+        brush.setColor(poly.color);
+        painter.setBrush(brush);
+        painter.drawPolygon(poly.points.data(), poly.points.size());
+    }
 }
 
 void Widget::cleanDnaClicked()
@@ -488,6 +548,8 @@ void Widget::optimizeDnaClicked()
         if (!progress.isVisible())
             break;
         optimizeColors(generated, poly, true);
+        if (!progress.isVisible())
+            break;
         optimizeShape(generated, poly, true);
         progress.increment();
         app->processEvents();
